@@ -1,0 +1,1095 @@
+/**
+ * Dev Ayurveda — Professional Invoice Generator Dashboard
+ * =========================================================
+ * Stack  : React 18 + Hooks
+ * PDF    : jsPDF + jsPDF-AutoTable  (CDN via esm.sh in artifact env)
+ * XLSX   : SheetJS (xlsx)
+ * Firebase: Stubbed with clear TODO markers — drop in your config to activate.
+ *
+ * GitHub-ready: all environment secrets go in .env (see README section below).
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * README (paste into your repo's README.md)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ## Setup
+ * 1. `npm create vite@latest dev-ayurveda-invoice -- --template react`
+ * 2. `cd dev-ayurveda-invoice && npm install`
+ * 3. `npm install jspdf jspdf-autotable xlsx firebase`
+ * 4. Copy this file to `src/App.jsx`
+ * 5. Create `.env` in project root:
+ *      VITE_FIREBASE_API_KEY=...
+ *      VITE_FIREBASE_AUTH_DOMAIN=...
+ *      VITE_FIREBASE_PROJECT_ID=...
+ *      (see Firebase console → Project Settings → Your apps)
+ * 6. `npm run dev`
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+import { useState, useCallback, useRef } from "react";
+import * as XLSX from "xlsx";
+
+// ─── Firebase (uncomment after npm install firebase & adding .env vars) ───────
+// import { initializeApp } from "firebase/app";
+// import { getFirestore, collection, addDoc, serverTimestamp } from "firebase/firestore";
+//
+// const firebaseConfig = {
+//   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+//   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+//   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+// };
+// const app = initializeApp(firebaseConfig);
+// const db  = getFirestore(app);
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+const GST_OPTIONS   = [0, 5, 12, 18];
+const PRODUCT_LIST  = [
+  "Ashwagandha Capsules",
+  "Triphala Churna",
+  "Brahmi Tablets",
+  "Shilajit Resin",
+  "Chyawanprash",
+  "Neem Capsules",
+  "Tulsi Drops",
+  "Giloy Juice",
+  "Haritaki Powder",
+  "Shatavari Capsules",
+  "Arjuna Capsules",
+  "Moringa Powder",
+  "Amla Juice",
+  "Turmeric Capsules",
+  "Panchakarma Oil",
+];
+
+const newRow = () => ({
+  id        : crypto.randomUUID(),
+  product   : "",
+  qty       : 1,
+  unitPrice : 0,
+  gstPct    : 18,
+});
+
+const formatINR = (n) =>
+  new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 2 }).format(n);
+
+const nowString = () => {
+  const d = new Date();
+  return d.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:mm"
+};
+
+const invoiceNumber = () =>
+  `DA-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 90000) + 10000)}`;
+
+// ─── Row-level math ───────────────────────────────────────────────────────────
+const rowCalc = (r) => {
+  const subtotal = r.qty * r.unitPrice;
+  const gstAmt   = (subtotal * r.gstPct) / 100;
+  return { subtotal, gstAmt, total: subtotal + gstAmt };
+};
+
+// ─── PDF Generator ────────────────────────────────────────────────────────────
+async function generatePDF(invoice, items, totals) {
+  // Dynamic import so the bundle stays lean
+  const { default: jsPDF }      = await import("https://esm.sh/jspdf@2.5.1");
+  const { default: autoTable }  = await import("https://esm.sh/jspdf-autotable@3.8.2");
+
+  const doc  = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const W    = doc.internal.pageSize.getWidth();
+  const pageH= doc.internal.pageSize.getHeight();
+
+  // ── Header band ──
+  doc.setFillColor(78, 52, 18);          // deep brown
+  doc.rect(0, 0, W, 38, "F");
+
+  doc.setFillColor(212, 160, 60);        // golden accent strip
+  doc.rect(0, 38, W, 3, "F");
+
+  // Logo placeholder circle
+  doc.setFillColor(212, 160, 60);
+  doc.circle(20, 19, 12, "F");
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(7);
+  doc.setFont("helvetica", "bold");
+  doc.text("DEV\nAYUR", 20, 16, { align: "center" });
+
+  // Business name
+  doc.setFontSize(22);
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(255, 255, 255);
+  doc.text("Dev Ayurveda", 38, 17);
+
+  doc.setFontSize(8);
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(212, 160, 60);
+  doc.text("Natural Wellness · Authentic Ayurveda", 38, 24);
+
+  doc.setTextColor(200, 200, 200);
+  doc.text("GSTIN: 07AABCD1234E1Z5  |  devayurveda@email.com  |  +91-98765-43210", 38, 30);
+
+  // ── Invoice meta ──
+  doc.setFontSize(9);
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(78, 52, 18);
+  doc.text("TAX INVOICE", W - 14, 48, { align: "right" });
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  doc.setTextColor(60, 60, 60);
+  doc.text(`Invoice No : ${invoice.invoiceNo}`, W - 14, 55, { align: "right" });
+  doc.text(`Date       : ${new Date(invoice.datetime).toLocaleString("en-IN")}`, W - 14, 61, { align: "right" });
+
+  // ── Bill To ──
+  doc.setFontSize(8);
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(78, 52, 18);
+  doc.text("Bill To:", 14, 48);
+
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(40, 40, 40);
+  doc.text(invoice.clientName,                           14, 54);
+  doc.text(`GSTIN: ${invoice.gstin || "N/A"}`,          14, 59);
+  doc.text(invoice.address,                              14, 64, { maxWidth: 80 });
+  doc.text(`Mob: ${invoice.mobile}`,                    14, 72);
+
+  // ── Items table ──
+  autoTable(doc, {
+    startY      : 80,
+    head        : [["#", "Product / Description", "Qty", "Unit Price", "GST %", "GST Amt", "Total"]],
+    body        : items.map((r, i) => {
+      const c = rowCalc(r);
+      return [
+        i + 1,
+        r.product || "—",
+        r.qty,
+        formatINR(r.unitPrice),
+        `${r.gstPct}%`,
+        formatINR(c.gstAmt),
+        formatINR(c.total),
+      ];
+    }),
+    headStyles  : { fillColor: [78, 52, 18], textColor: [255, 255, 255], fontSize: 8, fontStyle: "bold" },
+    alternateRowStyles: { fillColor: [252, 247, 237] },
+    bodyStyles  : { fontSize: 8, textColor: [40, 40, 40] },
+    columnStyles: {
+      0: { halign: "center", cellWidth: 8 },
+      2: { halign: "center", cellWidth: 12 },
+      3: { halign: "right",  cellWidth: 26 },
+      4: { halign: "center", cellWidth: 16 },
+      5: { halign: "right",  cellWidth: 24 },
+      6: { halign: "right",  cellWidth: 26 },
+    },
+    margin      : { left: 14, right: 14 },
+    theme       : "striped",
+  });
+
+  // ── Totals ──
+  const finalY = doc.lastAutoTable.finalY + 6;
+
+  const totalsData = [
+    ["Subtotal",  formatINR(totals.subtotal)],
+    ["Total GST", formatINR(totals.totalGST)],
+    ["Grand Total (INR)", formatINR(totals.grandTotal)],
+  ];
+
+  autoTable(doc, {
+    startY      : finalY,
+    body        : totalsData,
+    columnStyles: {
+      0: { halign: "right", fontStyle: "bold",   cellWidth: 50 },
+      1: { halign: "right", cellWidth: 36 },
+    },
+    bodyStyles  : { fontSize: 9 },
+    margin      : { left: W - 114, right: 14 },
+    theme       : "plain",
+    didParseCell: (data) => {
+      if (data.row.index === 2) {
+        data.cell.styles.fillColor    = [78, 52, 18];
+        data.cell.styles.textColor    = [255, 255, 255];
+        data.cell.styles.fontStyle    = "bold";
+        data.cell.styles.fontSize     = 10;
+      }
+    },
+  });
+
+  // ── Amount in words ──
+  const grandFinalY = doc.lastAutoTable.finalY + 8;
+  doc.setFontSize(8);
+  doc.setFont("helvetica", "italic");
+  doc.setTextColor(100, 100, 100);
+  doc.text(`Amount in words: ${amountToWords(totals.grandTotal)} Only`, 14, grandFinalY);
+
+  // ── Footer ──
+  doc.setFillColor(78, 52, 18);
+  doc.rect(0, pageH - 18, W, 18, "F");
+  doc.setFontSize(7);
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(200, 200, 200);
+  doc.text("This is a computer-generated invoice and does not require a physical signature.", W / 2, pageH - 10, { align: "center" });
+  doc.setTextColor(212, 160, 60);
+  doc.text("Dev Ayurveda — Rooted in Nature, Backed by Science.", W / 2, pageH - 5, { align: "center" });
+
+  return doc;
+}
+
+// ─── Tiny amount-to-words helper ─────────────────────────────────────────────
+function amountToWords(amount) {
+  const ones = ["","One","Two","Three","Four","Five","Six","Seven","Eight","Nine","Ten","Eleven","Twelve","Thirteen","Fourteen","Fifteen","Sixteen","Seventeen","Eighteen","Nineteen"];
+  const tens = ["","","Twenty","Thirty","Forty","Fifty","Sixty","Seventy","Eighty","Ninety"];
+  const toWords = (n) => {
+    if (n === 0) return "";
+    if (n < 20)  return ones[n] + " ";
+    if (n < 100) return tens[Math.floor(n / 10)] + " " + ones[n % 10] + " ";
+    if (n < 1000)return ones[Math.floor(n / 100)] + " Hundred " + toWords(n % 100);
+    if (n < 100000) return toWords(Math.floor(n / 1000)) + "Thousand " + toWords(n % 1000);
+    if (n < 10000000) return toWords(Math.floor(n / 100000)) + "Lakh " + toWords(n % 100000);
+    return toWords(Math.floor(n / 10000000)) + "Crore " + toWords(n % 10000000);
+  };
+  const [rupees, paise] = amount.toFixed(2).split(".");
+  let result = toWords(parseInt(rupees, 10)).trim() + " Rupees";
+  if (parseInt(paise, 10)) result += " and " + toWords(parseInt(paise, 10)).trim() + " Paise";
+  return result;
+}
+
+// ─── XLSX Export ─────────────────────────────────────────────────────────────
+function exportToXLSX(invoice, items, totals) {
+  const rows = items.map((r) => {
+    const c = rowCalc(r);
+    return {
+      "Invoice No"   : invoice.invoiceNo,
+      "Date"         : new Date(invoice.datetime).toLocaleString("en-IN"),
+      "Client Name"  : invoice.clientName,
+      "GSTIN"        : invoice.gstin,
+      "Mobile"       : invoice.mobile,
+      "Product"      : r.product,
+      "Quantity"     : r.qty,
+      "Unit Price"   : r.unitPrice,
+      "GST %"        : r.gstPct,
+      "GST Amount"   : +c.gstAmt.toFixed(2),
+      "Line Total"   : +c.total.toFixed(2),
+      "Subtotal"     : +totals.subtotal.toFixed(2),
+      "Total GST"    : +totals.totalGST.toFixed(2),
+      "Grand Total"  : +totals.grandTotal.toFixed(2),
+    };
+  });
+
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Invoices");
+  XLSX.writeFile(wb, `DevAyurveda_${invoice.invoiceNo}.xlsx`);
+}
+
+// ─── Firebase Save (stubbed) ──────────────────────────────────────────────────
+async function saveToFirestore(invoiceData) {
+  // TODO: Uncomment after configuring Firebase (see README above)
+  // await addDoc(collection(db, "invoices"), {
+  //   ...invoiceData,
+  //   createdAt: serverTimestamp(),
+  // });
+  console.info("[Firebase] Invoice data ready to save:", invoiceData);
+  // Simulate network delay
+  await new Promise((r) => setTimeout(r, 600));
+}
+
+// ─── Styles (injected once) ───────────────────────────────────────────────────
+const CSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --brown     : #4E3412;
+    --brown-mid : #7A5230;
+    --gold      : #D4A03C;
+    --gold-light: #F0C96A;
+    --cream     : #FBF6EE;
+    --cream-dark: #F0E8D8;
+    --text      : #2C1A0A;
+    --muted     : #7B6A58;
+    --white     : #FFFFFF;
+    --danger    : #C0392B;
+    --success   : #27AE60;
+    --radius    : 12px;
+    --shadow    : 0 4px 24px rgba(78,52,18,.12);
+    --shadow-lg : 0 8px 48px rgba(78,52,18,.18);
+  }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--cream);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  /* ── Layout ── */
+  .app-shell {
+    display: grid;
+    grid-template-rows: auto 1fr;
+    min-height: 100vh;
+  }
+
+  /* ── Top Nav ── */
+  .topnav {
+    background: var(--brown);
+    padding: 0 32px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    height: 64px;
+    box-shadow: 0 2px 16px rgba(0,0,0,.25);
+  }
+  .topnav-logo {
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    background: var(--gold);
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Playfair Display', serif;
+    font-size: 11px; font-weight: 700;
+    color: var(--brown);
+    letter-spacing: -.5px;
+    text-align: center;
+    line-height: 1.15;
+    flex-shrink: 0;
+  }
+  .topnav-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 20px;
+    color: var(--white);
+    letter-spacing: .3px;
+  }
+  .topnav-subtitle {
+    font-size: 11px;
+    color: var(--gold-light);
+    margin-top: 1px;
+  }
+  .topnav-badge {
+    margin-left: auto;
+    background: rgba(212,160,60,.15);
+    border: 1px solid var(--gold);
+    color: var(--gold-light);
+    font-size: 11px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    letter-spacing: .5px;
+  }
+
+  /* ── Main content ── */
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 380px;
+    gap: 24px;
+    padding: 28px 32px;
+    align-items: start;
+    max-width: 1400px;
+    margin: 0 auto;
+    width: 100%;
+  }
+  @media (max-width: 1024px) {
+    .main { grid-template-columns: 1fr; padding: 20px 16px; }
+  }
+
+  /* ── Card ── */
+  .card {
+    background: var(--white);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .card-header {
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--cream-dark);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .card-header-icon {
+    width: 32px; height: 32px;
+    border-radius: 8px;
+    background: var(--cream);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+  }
+  .card-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 15px;
+    color: var(--brown);
+  }
+  .card-body { padding: 24px; }
+
+  /* ── Form Grid ── */
+  .form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .form-grid.cols-1 { grid-template-columns: 1fr; }
+  .form-grid.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+  @media (max-width: 640px) {
+    .form-grid, .form-grid.cols-3 { grid-template-columns: 1fr; }
+  }
+  .form-group { display: flex; flex-direction: column; gap: 6px; }
+  .form-group.span-2 { grid-column: span 2; }
+  @media (max-width: 640px) { .form-group.span-2 { grid-column: span 1; } }
+
+  .label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .7px;
+    color: var(--muted);
+  }
+  .input, .select, .textarea {
+    border: 1.5px solid var(--cream-dark);
+    border-radius: 8px;
+    padding: 10px 13px;
+    font-size: 13.5px;
+    font-family: 'DM Sans', sans-serif;
+    color: var(--text);
+    background: var(--cream);
+    transition: border-color .2s, box-shadow .2s;
+    outline: none;
+    width: 100%;
+  }
+  .input:focus, .select:focus, .textarea:focus {
+    border-color: var(--gold);
+    box-shadow: 0 0 0 3px rgba(212,160,60,.15);
+    background: var(--white);
+  }
+  .input.error { border-color: var(--danger); }
+  .error-msg { font-size: 11px; color: var(--danger); margin-top: 2px; }
+
+  /* ── Product Table ── */
+  .table-wrap { overflow-x: auto; margin-top: 8px; }
+  .prod-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .prod-table th {
+    background: var(--brown);
+    color: var(--gold-light);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .6px;
+    text-transform: uppercase;
+    padding: 10px 12px;
+    text-align: left;
+    white-space: nowrap;
+  }
+  .prod-table th:first-child { border-radius: 8px 0 0 8px; }
+  .prod-table th:last-child  { border-radius: 0 8px 8px 0; }
+  .prod-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--cream-dark);
+    vertical-align: middle;
+  }
+  .prod-table tr:last-child td { border-bottom: none; }
+  .prod-table tr:hover td { background: var(--cream); }
+  .row-num {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    background: var(--cream-dark);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 600; color: var(--muted);
+    flex-shrink: 0;
+  }
+  .td-center { text-align: center; }
+  .td-right  { text-align: right; font-variant-numeric: tabular-nums; }
+  .line-total { font-weight: 600; color: var(--brown); }
+
+  /* Datalist-backed input */
+  .product-input { min-width: 160px; }
+
+  /* ── Btn Row ── */
+  .btn-row { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+
+  /* ── Buttons ── */
+  .btn {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 10px 20px;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    transition: transform .15s, box-shadow .15s, opacity .15s;
+  }
+  .btn:active { transform: scale(.97); }
+  .btn:disabled { opacity: .55; cursor: not-allowed; }
+
+  .btn-primary {
+    background: var(--brown);
+    color: var(--white);
+    box-shadow: 0 4px 14px rgba(78,52,18,.35);
+  }
+  .btn-primary:hover:not(:disabled) { background: var(--brown-mid); box-shadow: 0 6px 20px rgba(78,52,18,.45); }
+
+  .btn-gold {
+    background: var(--gold);
+    color: var(--brown);
+    box-shadow: 0 4px 14px rgba(212,160,60,.35);
+  }
+  .btn-gold:hover:not(:disabled) { background: var(--gold-light); }
+
+  .btn-outline {
+    background: transparent;
+    border: 1.5px solid var(--brown);
+    color: var(--brown);
+  }
+  .btn-outline:hover:not(:disabled) { background: var(--cream); }
+
+  .btn-danger {
+    background: transparent;
+    border: 1.5px solid #e0c8b8;
+    color: var(--danger);
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+  .btn-danger:hover:not(:disabled) { background: #fff0ee; border-color: var(--danger); }
+
+  .btn-add {
+    background: var(--cream);
+    border: 1.5px dashed var(--gold);
+    color: var(--brown-mid);
+    width: 100%;
+    justify-content: center;
+    padding: 11px;
+    margin-top: 8px;
+    border-radius: 8px;
+    font-size: 13px;
+  }
+  .btn-add:hover { background: rgba(212,160,60,.08); }
+
+  /* ── Summary Card ── */
+  .summary-panel {
+    display: flex; flex-direction: column; gap: 16px;
+    position: sticky; top: 24px;
+  }
+  .totals-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--cream-dark);
+    font-size: 14px;
+  }
+  .totals-row:last-child { border-bottom: none; }
+  .totals-label { color: var(--muted); }
+  .totals-value { font-variant-numeric: tabular-nums; font-weight: 500; }
+  .totals-row.grand {
+    background: var(--brown);
+    margin: 8px -24px -24px;
+    padding: 16px 24px;
+    border-radius: 0 0 var(--radius) var(--radius);
+  }
+  .totals-row.grand .totals-label { color: var(--gold-light); font-weight: 600; font-size: 15px; }
+  .totals-row.grand .totals-value { color: var(--white); font-size: 20px; font-weight: 700; font-family: 'Playfair Display', serif; }
+
+  /* ── Toast ── */
+  .toast-container {
+    position: fixed; top: 80px; right: 24px; z-index: 9999;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .toast {
+    padding: 12px 20px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 500;
+    box-shadow: var(--shadow-lg);
+    animation: slideIn .3s ease;
+    display: flex; align-items: center; gap: 8px;
+    max-width: 320px;
+  }
+  .toast.success { background: #EAFAF2; border-left: 4px solid var(--success); color: #1a5c38; }
+  .toast.error   { background: #FDEDEC; border-left: 4px solid var(--danger);  color: #7B241C; }
+  .toast.info    { background: var(--cream); border-left: 4px solid var(--gold); color: var(--brown); }
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateX(40px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+
+  /* ── Status badge ── */
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    display: inline-block; margin-right: 4px;
+  }
+  .status-dot.green { background: var(--success); }
+  .status-dot.gold  { background: var(--gold); animation: pulse 1.5s infinite; }
+  @keyframes pulse {
+    0%,100% { opacity: 1; } 50% { opacity: .4; }
+  }
+
+  /* ── Invoice counter ── */
+  .stat-grid {
+    display: grid; grid-template-columns: repeat(3,1fr); gap: 12px;
+  }
+  .stat-box {
+    background: var(--cream);
+    border-radius: 10px;
+    padding: 14px;
+    text-align: center;
+  }
+  .stat-num {
+    font-family: 'Playfair Display', serif;
+    font-size: 24px;
+    color: var(--brown);
+  }
+  .stat-lbl { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-top: 2px; }
+
+  /* ── Divider ── */
+  .divider { border: none; border-top: 1px solid var(--cream-dark); margin: 4px 0; }
+
+  /* ── Spinner ── */
+  .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid rgba(255,255,255,.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    flex-shrink: 0;
+  }
+  .spinner.dark {
+    border-color: rgba(78,52,18,.2);
+    border-top-color: var(--brown);
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+`;
+
+// ─── Toast Hook ───────────────────────────────────────────────────────────────
+function useToast() {
+  const [toasts, setToasts] = useState([]);
+  const push = useCallback((msg, type = "info") => {
+    const id = crypto.randomUUID();
+    setToasts((t) => [...t, { id, msg, type }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4000);
+  }, []);
+  return { toasts, push };
+}
+
+// ─── Validation ───────────────────────────────────────────────────────────────
+function validate(form, rows) {
+  const errs = {};
+  if (!form.clientName.trim()) errs.clientName = "Client name is required";
+  if (!form.mobile.trim() || !/^[6-9]\d{9}$/.test(form.mobile.trim()))
+    errs.mobile = "Valid 10-digit mobile required";
+  if (!form.address.trim()) errs.address = "Address is required";
+  if (rows.length === 0) errs.rows = "Add at least one product";
+  rows.forEach((r, i) => {
+    if (!r.product) errs[`row_${i}_product`] = "Select product";
+    if (r.qty <= 0)  errs[`row_${i}_qty`]     = "Qty > 0";
+    if (r.unitPrice <= 0) errs[`row_${i}_price`] = "Price > 0";
+  });
+  return errs;
+}
+
+// ─── App ──────────────────────────────────────────────────────────────────────
+export default function App() {
+  const { toasts, push } = useToast();
+  const styleRef = useRef(false);
+
+  // Inject CSS once
+  if (!styleRef.current) {
+    styleRef.current = true;
+    if (typeof document !== "undefined") {
+      const s = document.createElement("style");
+      s.textContent = CSS;
+      document.head.appendChild(s);
+    }
+  }
+
+  // ── Session stats ──
+  const [sessionStats, setSessionStats] = useState({ count: 0, revenue: 0 });
+
+  // ── Form state ──
+  const [form, setForm] = useState({
+    clientName : "",
+    gstin      : "",
+    address    : "",
+    mobile     : "",
+    datetime   : nowString(),
+    invoiceNo  : invoiceNumber(),
+  });
+
+  const [rows, setRows]       = useState([newRow()]);
+  const [errors, setErrors]   = useState({});
+  const [loading, setLoading] = useState(false);
+
+  const setField = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  // ── Row actions ──
+  const addRow = () => setRows((r) => [...r, newRow()]);
+  const removeRow = (id) => setRows((r) => r.filter((x) => x.id !== id));
+  const updateRow = (id, k, v) =>
+    setRows((r) => r.map((x) => (x.id === id ? { ...x, [k]: v } : x)));
+
+  // ── Totals ──
+  const totals = rows.reduce(
+    (acc, r) => {
+      const c = rowCalc(r);
+      acc.subtotal   += c.subtotal;
+      acc.totalGST   += c.gstAmt;
+      acc.grandTotal += c.total;
+      return acc;
+    },
+    { subtotal: 0, totalGST: 0, grandTotal: 0 }
+  );
+
+  // ── Generate handler ──
+  const handleGenerate = async () => {
+    const errs = validate(form, rows);
+    if (Object.keys(errs).length) {
+      setErrors(errs);
+      push("Please fix the highlighted errors.", "error");
+      return;
+    }
+    setErrors({});
+    setLoading(true);
+
+    const invoiceData = { ...form, items: rows, totals };
+
+    try {
+      // 1) Save to Firestore
+      push("Saving to database…", "info");
+      await saveToFirestore(invoiceData);
+      push("Saved to Firestore ✓", "success");
+
+      // 2) Generate PDF
+      push("Generating PDF…", "info");
+      const doc = await generatePDF(form, rows, totals);
+      doc.save(`DevAyurveda_${form.invoiceNo}.pdf`);
+      push("PDF downloaded ✓", "success");
+
+      // 3) Update session stats
+      setSessionStats((s) => ({
+        count  : s.count + 1,
+        revenue: s.revenue + totals.grandTotal,
+      }));
+
+      // 4) Reset form for next invoice
+      setForm({
+        clientName : "",
+        gstin      : "",
+        address    : "",
+        mobile     : "",
+        datetime   : nowString(),
+        invoiceNo  : invoiceNumber(),
+      });
+      setRows([newRow()]);
+    } catch (e) {
+      console.error(e);
+      push("Something went wrong. Check console.", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ── Print handler ──
+  const handlePrint = async () => {
+    const errs = validate(form, rows);
+    if (Object.keys(errs).length) {
+      setErrors(errs);
+      push("Fix errors before printing.", "error");
+      return;
+    }
+    setLoading(true);
+    try {
+      const doc = await generatePDF(form, rows, totals);
+      const blob = doc.output("blob");
+      const url  = URL.createObjectURL(blob);
+      const w    = window.open(url);
+      w?.print();
+    } catch (e) {
+      push("Print failed. Check console.", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ── XLSX Export ──
+  const handleXLSX = () => {
+    const errs = validate(form, rows);
+    if (Object.keys(errs).length) { setErrors(errs); push("Fix errors first.", "error"); return; }
+    exportToXLSX(form, rows, totals);
+    push("Excel file downloaded ✓", "success");
+  };
+
+  return (
+    <div className="app-shell">
+      {/* Toast container */}
+      <div className="toast-container">
+        {toasts.map((t) => (
+          <div key={t.id} className={`toast ${t.type}`}>
+            {t.type === "success" ? "✅" : t.type === "error" ? "❌" : "ℹ️"} {t.msg}
+          </div>
+        ))}
+      </div>
+
+      {/* Top Nav */}
+      <nav className="topnav">
+        <div className="topnav-logo">DEV<br/>AYUR</div>
+        <div>
+          <div className="topnav-title">Dev Ayurveda</div>
+          <div className="topnav-subtitle">Invoice Generator Dashboard</div>
+        </div>
+        <span className="topnav-badge">
+          <span className="status-dot green" /> GSTIN: 07AABCD1234E1Z5
+        </span>
+      </nav>
+
+      {/* Main */}
+      <div className="main">
+        {/* ── Left column ── */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+
+          {/* Customer Details */}
+          <div className="card">
+            <div className="card-header">
+              <div className="card-header-icon">👤</div>
+              <span className="card-title">Customer Details</span>
+            </div>
+            <div className="card-body">
+              <div className="form-grid">
+                <div className="form-group">
+                  <label className="label">Client Name *</label>
+                  <input className={`input ${errors.clientName ? "error" : ""}`}
+                    placeholder="e.g. Ramesh Sharma"
+                    value={form.clientName}
+                    onChange={(e) => setField("clientName", e.target.value)} />
+                  {errors.clientName && <span className="error-msg">{errors.clientName}</span>}
+                </div>
+
+                <div className="form-group">
+                  <label className="label">GSTIN (optional)</label>
+                  <input className="input" placeholder="e.g. 07AABCD1234E1Z5"
+                    value={form.gstin}
+                    onChange={(e) => setField("gstin", e.target.value.toUpperCase())} />
+                </div>
+
+                <div className="form-group">
+                  <label className="label">Mobile Number *</label>
+                  <input className={`input ${errors.mobile ? "error" : ""}`}
+                    placeholder="10-digit mobile"
+                    maxLength={10}
+                    value={form.mobile}
+                    onChange={(e) => setField("mobile", e.target.value.replace(/\D/g, ""))} />
+                  {errors.mobile && <span className="error-msg">{errors.mobile}</span>}
+                </div>
+
+                <div className="form-group">
+                  <label className="label">Invoice Date & Time</label>
+                  <input type="datetime-local" className="input"
+                    value={form.datetime}
+                    onChange={(e) => setField("datetime", e.target.value)} />
+                </div>
+
+                <div className="form-group span-2">
+                  <label className="label">Billing Address *</label>
+                  <textarea className={`textarea ${errors.address ? "error" : ""}`}
+                    rows={2}
+                    placeholder="Full billing address"
+                    value={form.address}
+                    onChange={(e) => setField("address", e.target.value)} />
+                  {errors.address && <span className="error-msg">{errors.address}</span>}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Product Table */}
+          <div className="card">
+            <div className="card-header">
+              <div className="card-header-icon">📦</div>
+              <span className="card-title">Products / Services</span>
+              {errors.rows && (
+                <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--danger)" }}>
+                  {errors.rows}
+                </span>
+              )}
+            </div>
+            <div className="card-body">
+              {/* Datalist for product suggestions */}
+              <datalist id="product-list">
+                {PRODUCT_LIST.map((p) => <option key={p} value={p} />)}
+              </datalist>
+
+              <div className="table-wrap">
+                <table className="prod-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 36 }}>#</th>
+                      <th>Product / Description</th>
+                      <th style={{ width: 70 }}>Qty</th>
+                      <th style={{ width: 110 }}>Unit Price (₹)</th>
+                      <th style={{ width: 90 }}>GST %</th>
+                      <th style={{ width: 100 }} className="td-right">Subtotal</th>
+                      <th style={{ width: 100 }} className="td-right">GST Amt</th>
+                      <th style={{ width: 110 }} className="td-right">Line Total</th>
+                      <th style={{ width: 44 }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r, i) => {
+                      const c = rowCalc(r);
+                      return (
+                        <tr key={r.id}>
+                          <td><div className="row-num">{i + 1}</div></td>
+                          <td>
+                            <input
+                              className={`input product-input ${errors[`row_${i}_product`] ? "error" : ""}`}
+                              list="product-list"
+                              placeholder="Type or select…"
+                              value={r.product}
+                              onChange={(e) => updateRow(r.id, "product", e.target.value)}
+                              style={{ minWidth: 160 }}
+                            />
+                          </td>
+                          <td>
+                            <input type="number" className={`input ${errors[`row_${i}_qty`] ? "error" : ""}`}
+                              min={1} value={r.qty}
+                              onChange={(e) => updateRow(r.id, "qty", Math.max(1, +e.target.value))}
+                              style={{ width: 62 }} />
+                          </td>
+                          <td>
+                            <input type="number" className={`input ${errors[`row_${i}_price`] ? "error" : ""}`}
+                              min={0} step={0.01} value={r.unitPrice}
+                              onChange={(e) => updateRow(r.id, "unitPrice", +e.target.value)}
+                              style={{ width: 100 }} />
+                          </td>
+                          <td>
+                            <select className="select"
+                              value={r.gstPct}
+                              onChange={(e) => updateRow(r.id, "gstPct", +e.target.value)}
+                              style={{ width: 80 }}>
+                              {GST_OPTIONS.map((g) => <option key={g} value={g}>{g}%</option>)}
+                            </select>
+                          </td>
+                          <td className="td-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                            ₹{c.subtotal.toFixed(2)}
+                          </td>
+                          <td className="td-right" style={{ color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+                            ₹{c.gstAmt.toFixed(2)}
+                          </td>
+                          <td className="td-right line-total">₹{c.total.toFixed(2)}</td>
+                          <td>
+                            {rows.length > 1 && (
+                              <button className="btn btn-danger"
+                                onClick={() => removeRow(r.id)}
+                                title="Remove row">✕</button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <button className="btn btn-add" onClick={addRow}>
+                + Add Product Row
+              </button>
+
+              {/* Action buttons */}
+              <div className="btn-row" style={{ marginTop: 24 }}>
+                <button className="btn btn-primary" onClick={handleGenerate} disabled={loading}>
+                  {loading ? <><span className="spinner" /> Processing…</> : "⚡ Generate & Save Invoice"}
+                </button>
+                <button className="btn btn-outline" onClick={handlePrint} disabled={loading}>
+                  🖨 Print Preview
+                </button>
+                <button className="btn btn-outline" onClick={handleXLSX} disabled={loading}>
+                  📊 Export Excel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ── Right column ── */}
+        <div className="summary-panel">
+
+          {/* Session Stats */}
+          <div className="card">
+            <div className="card-header">
+              <div className="card-header-icon">📈</div>
+              <span className="card-title">Session Summary</span>
+            </div>
+            <div className="card-body">
+              <div className="stat-grid">
+                <div className="stat-box">
+                  <div className="stat-num">{sessionStats.count}</div>
+                  <div className="stat-lbl">Invoices</div>
+                </div>
+                <div className="stat-box" style={{ gridColumn: "span 2" }}>
+                  <div className="stat-num">{formatINR(sessionStats.revenue)}</div>
+                  <div className="stat-lbl">Revenue Generated</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Invoice Preview */}
+          <div className="card">
+            <div className="card-header">
+              <div className="card-header-icon">🧾</div>
+              <span className="card-title">Invoice Summary</span>
+            </div>
+            <div className="card-body">
+              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 12 }}>
+                <span className="status-dot gold" />
+                Invoice No: <strong style={{ color: "var(--brown)" }}>{form.invoiceNo}</strong>
+              </div>
+
+              {form.clientName && (
+                <div style={{ marginBottom: 12, padding: "10px 12px", background: "var(--cream)", borderRadius: 8 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{form.clientName}</div>
+                  {form.mobile && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>📱 {form.mobile}</div>}
+                  {form.gstin  && <div style={{ fontSize: 11, color: "var(--muted)" }}>GSTIN: {form.gstin}</div>}
+                </div>
+              )}
+
+              <hr className="divider" />
+
+              {rows.filter((r) => r.product).map((r, i) => {
+                const c = rowCalc(r);
+                return (
+                  <div key={r.id} style={{ fontSize: 12, padding: "6px 0", borderBottom: "1px solid var(--cream-dark)", display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ color: "var(--muted)" }}>{r.product || `Item ${i+1}`} × {r.qty}</span>
+                    <span style={{ fontWeight: 500 }}>₹{c.total.toFixed(2)}</span>
+                  </div>
+                );
+              })}
+
+              <div className="totals-row" style={{ marginTop: 8 }}>
+                <span className="totals-label">Subtotal</span>
+                <span className="totals-value">₹{totals.subtotal.toFixed(2)}</span>
+              </div>
+              <div className="totals-row">
+                <span className="totals-label">Total GST</span>
+                <span className="totals-value" style={{ color: "var(--brown-mid)" }}>
+                  + ₹{totals.totalGST.toFixed(2)}
+                </span>
+              </div>
+              <div className="totals-row grand">
+                <span className="totals-label">Grand Total</span>
+                <span className="totals-value">{formatINR(totals.grandTotal)}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Help Card */}
+          <div className="card" style={{ background: "var(--brown)", color: "var(--cream)" }}>
+            <div className="card-body">
+              <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 14, marginBottom: 8, color: "var(--gold-light)" }}>
+                🌿 Quick Guide
+              </div>
+              <ul style={{ paddingLeft: 16, fontSize: 12, color: "var(--cream-dark)", lineHeight: 1.9 }}>
+                <li>Fill customer details</li>
+                <li>Add product rows — type or select from the dropdown</li>
+                <li>GST is auto-calculated per line</li>
+                <li><strong style={{ color: "var(--gold)" }}>Generate</strong> → PDF + Firestore save</li>
+                <li><strong style={{ color: "var(--gold)" }}>Export Excel</strong> → accounting sheet</li>
+                <li>Add your Firebase config in <code style={{ fontSize: 11, background: "rgba(255,255,255,.1)", padding: "1px 4px", borderRadius: 4 }}>.env</code> to activate DB sync</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
